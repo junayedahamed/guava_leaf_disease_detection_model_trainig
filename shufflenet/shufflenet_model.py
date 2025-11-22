@@ -14,6 +14,78 @@ import json
 from pathlib import Path
 import numpy as np
 from datetime import datetime
+import os
+
+# ============================================================================
+# Check Required Packages for TFLite Conversion (Early Check)
+# ============================================================================
+print("🔍 Checking required packages for TFLite conversion...")
+
+# Check ONNX
+try:
+    import onnx
+    import onnxruntime
+    ONNX_AVAILABLE = True
+    print("✅ ONNX: Available")
+except ImportError:
+    ONNX_AVAILABLE = False
+    print("❌ ONNX: NOT AVAILABLE")
+    print("   Install with: pip install onnx onnxruntime")
+
+# Check TensorFlow
+try:
+    import tensorflow as tf
+    TF_AVAILABLE = True
+    print("✅ TensorFlow: Available")
+except ImportError:
+    TF_AVAILABLE = False
+    print("❌ TensorFlow: NOT AVAILABLE")
+    print("   Install with: pip install tensorflow")
+
+# Check onnx-tf (for ONNX to TensorFlow conversion)
+ONNX_TF_AVAILABLE = False
+if ONNX_AVAILABLE:
+    try:
+        from onnx_tf.backend import prepare
+        ONNX_TF_AVAILABLE = True
+        print("✅ onnx-tf: Available")
+    except ImportError:
+        ONNX_TF_AVAILABLE = False
+        print("❌ onnx-tf: NOT AVAILABLE")
+        print("   Install with: pip install onnx-tf")
+
+# Check if all packages are available
+TFLITE_CONVERSION_READY = ONNX_AVAILABLE and TF_AVAILABLE and ONNX_TF_AVAILABLE
+
+if not TFLITE_CONVERSION_READY:
+    print("\n" + "="*70)
+    print("⚠️  WARNING: TFLite conversion packages are missing!")
+    print("="*70)
+    print("Required packages for TFLite conversion:")
+    missing_packages = []
+    if not ONNX_AVAILABLE:
+        print("  ❌ pip install onnx onnxruntime")
+        missing_packages.append("onnx onnxruntime")
+    if not TF_AVAILABLE:
+        print("  ❌ pip install tensorflow")
+        missing_packages.append("tensorflow")
+    if not ONNX_TF_AVAILABLE:
+        print("  ❌ pip install onnx-tf")
+        missing_packages.append("onnx-tf")
+    print("\n⚠️  Training will continue, but TFLite conversion will FAIL at the end.")
+    print("⚠️  Install missing packages NOW to avoid re-running training:")
+    print(f"   pip install {' '.join(missing_packages)}")
+    print("="*70)
+    print("⏸️  Waiting 5 seconds... (Press Ctrl+C to stop and install packages)")
+    print("="*70)
+    try:
+        time.sleep(5)
+    except KeyboardInterrupt:
+        print("\n❌ Stopped by user. Please install packages and re-run.")
+        exit(1)
+    print("✅ Continuing with training...\n")
+else:
+    print("✅ All TFLite conversion packages are available!\n")
 
 # ============================================================================
 # Configuration
@@ -29,10 +101,14 @@ CONFIG = {
     'img_size': 224,
     'num_classes': 5,  # 5 classes for guava dataset
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'save_dir': '.',
+    'model_save_dir': './models',  # Customizable: Path where models will be saved
     'warmup_epochs': 3,
     'mixup_alpha': 0.2,  # MixUp for better generalization
 }
+
+# Create model save directory if it doesn't exist
+os.makedirs(CONFIG['model_save_dir'], exist_ok=True)
+print(f"📁 Model save directory: {CONFIG['model_save_dir']}")
 
 print(f"🚀 ShuffleNetV2 Training Configuration - Guava Dataset")
 print(f"📱 Device: {CONFIG['device']}")
@@ -213,6 +289,111 @@ def mixup_data(x, y, alpha=0.2):
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+# ============================================================================
+# TFLite Conversion Function
+# ============================================================================
+def convert_to_tflite(model, output_path, img_size=224):
+    """
+    Convert PyTorch model to TFLite format
+    Steps: PyTorch -> ONNX -> TensorFlow -> TFLite
+    """
+    print("\n" + "="*70)
+    print("🔄 Converting model to TFLite format...")
+    print("="*70)
+    
+    # Quick check using the flag set at startup
+    if not TFLITE_CONVERSION_READY:
+        print("❌ Required packages for TFLite conversion are not available.")
+        print("   Missing packages:")
+        if not ONNX_AVAILABLE:
+            print("     - onnx, onnxruntime (pip install onnx onnxruntime)")
+        if not TF_AVAILABLE:
+            print("     - tensorflow (pip install tensorflow)")
+        if not ONNX_TF_AVAILABLE:
+            print("     - onnx-tf (pip install onnx-tf)")
+        print("\n   Please install missing packages and re-run the script.")
+        return False
+    
+    try:
+        # Step 1: Convert PyTorch to ONNX
+        print("📦 Step 1: Converting PyTorch to ONNX...")
+        model.eval()
+        onnx_path = output_path.replace('.tflite', '.onnx')
+        
+        # Create dummy input
+        dummy_input = torch.randn(1, 3, img_size, img_size).to(CONFIG['device'])
+        
+        # Export to ONNX
+        torch.onnx.export(
+            model,
+            dummy_input,
+            onnx_path,
+            input_names=['input'],
+            output_names=['output'],
+            dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
+            opset_version=11,
+            do_constant_folding=True
+        )
+        print(f"✅ ONNX model saved: {onnx_path}")
+        
+        # Step 2: Convert ONNX to TensorFlow
+        print("📦 Step 2: Converting ONNX to TensorFlow...")
+        try:
+            # Import is already checked at startup, but verify again
+            from onnx_tf.backend import prepare
+            
+            onnx_model = onnx.load(onnx_path)
+            tf_rep = prepare(onnx_model)
+            tf_path = output_path.replace('.tflite', '_tf')
+            tf_rep.export_graph(tf_path)
+            print(f"✅ TensorFlow model saved: {tf_path}")
+        except Exception as e:
+            print(f"❌ Error converting ONNX to TensorFlow: {e}")
+            if os.path.exists(onnx_path):
+                print(f"   ONNX model is available at: {onnx_path}")
+                print("   You can manually convert it later using onnx-tf")
+            return False
+        
+        # Step 3: Convert TensorFlow to TFLite
+        print("📦 Step 3: Converting TensorFlow to TFLite...")
+        try:
+            converter = tf.lite.TFLiteConverter.from_saved_model(tf_path)
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            # Set target spec for better compatibility
+            converter.target_spec.supported_ops = [
+                tf.lite.OpsSet.TFLITE_BUILTINS,  # Enable TensorFlow Lite ops
+                tf.lite.OpsSet.SELECT_TF_OPS     # Enable TensorFlow ops
+            ]
+            converter._experimental_lower_tensor_list_ops = False
+            tflite_model = converter.convert()
+            
+            # Save TFLite model
+            with open(output_path, 'wb') as f:
+                f.write(tflite_model)
+            
+            print(f"✅ TFLite model saved: {output_path}")
+            print(f"📊 Model size: {os.path.getsize(output_path) / (1024*1024):.2f} MB")
+            
+            # Cleanup intermediate TensorFlow model (optional - comment out if you want to keep it)
+            try:
+                import shutil
+                if os.path.exists(tf_path):
+                    shutil.rmtree(tf_path)
+                    print(f"🧹 Cleaned up intermediate TensorFlow model")
+            except:
+                pass
+            
+            return True
+        except Exception as e:
+            print(f"❌ Error converting TensorFlow to TFLite: {e}")
+            return False
+        
+    except Exception as e:
+        print(f"❌ Error converting to TFLite: {e}")
+        print("   Make sure you have installed: onnx, onnxruntime, tensorflow, onnx-tf")
+        return False
+
 # ============================================================================
 # Training Function
 # ============================================================================
@@ -321,14 +502,15 @@ for epoch in range(CONFIG['num_epochs']):
     if val_acc > best_val_acc:
         best_val_acc = val_acc
         checkpoint_name = f"best_shufflenetv2_{val_acc:.2f}.pth"
+        checkpoint_path = os.path.join(CONFIG['model_save_dir'], checkpoint_name)
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_acc': val_acc,
             'config': CONFIG
-        }, checkpoint_name)
-        print(f"💾 Saved best model: {checkpoint_name}")
+        }, checkpoint_path)
+        print(f"💾 Saved best model: {checkpoint_path}")
     
     # Check if target reached
     if val_acc >= 98.0:
@@ -344,11 +526,49 @@ print("="*70)
 # Save history
 timestamp = int(time.time())
 history_file = f"shufflenetv2_history_{timestamp}.json"
-with open(history_file, 'w') as f:
+history_path = os.path.join(CONFIG['model_save_dir'], history_file)
+with open(history_path, 'w') as f:
     json.dump(history, f, indent=2)
-print(f"💾 History saved: {history_file}")
+print(f"💾 History saved: {history_path}")
 
 print(f"\n📊 Final Results:")
 print(f"   Train Acc: {history['train_acc'][-1]:.2f}%")
 print(f"   Val Acc: {history['val_acc'][-1]:.2f}%")
 print(f"   Best Val Acc: {best_val_acc:.2f}%")
+
+# ============================================================================
+# Convert Best Model to TFLite
+# ============================================================================
+# Load the best model for conversion
+print("\n" + "="*70)
+print("📱 Preparing model for TFLite conversion...")
+print("="*70)
+
+# Find the best model checkpoint
+best_checkpoint = None
+checkpoint_files = [f for f in os.listdir(CONFIG['model_save_dir']) 
+                   if f.startswith('best_shufflenetv2_') and f.endswith('.pth')]
+if checkpoint_files:
+    # Sort by validation accuracy in filename
+    checkpoint_files.sort(key=lambda x: float(x.split('_')[2].replace('.pth', '')))
+    best_checkpoint = os.path.join(CONFIG['model_save_dir'], checkpoint_files[-1])
+    print(f"📂 Loading best checkpoint: {best_checkpoint}")
+    
+    # Load model state
+    checkpoint = torch.load(best_checkpoint, map_location=CONFIG['device'])
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    
+    # Convert to TFLite
+    tflite_filename = f"shufflenetv2_guava_{best_val_acc:.2f}.tflite"
+    tflite_path = os.path.join(CONFIG['model_save_dir'], tflite_filename)
+    success = convert_to_tflite(model, tflite_path, CONFIG['img_size'])
+    
+    if success:
+        print(f"\n✅ TFLite conversion completed successfully!")
+        print(f"📱 Model saved as: {tflite_path}")
+    else:
+        print(f"\n⚠️  TFLite conversion failed. PyTorch model is still available.")
+        print(f"   Required packages: pip install onnx onnxruntime tensorflow onnx-tf")
+else:
+    print("⚠️  No checkpoint found for TFLite conversion.")
