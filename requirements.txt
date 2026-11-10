@@ -1,0 +1,27 @@
+# Core Deep Learning Frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+tensorflow>=2.10.0
+
+# Scientific Computing & Data Processing
+numpy>=1.22.0
+pandas>=1.4.0
+scipy>=1.8.0
+scikit-learn>=1.1.0
+
+# Computer Vision & Image Processing
+pillow>=9.0.0
+opencv-python>=4.6.0
+
+# Visualization & Plotting
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Utilities & Progress Tracking
+tqdm>=4.64.0
+
+# Model Export & Conversion (PyTorch -> ONNX -> TFLite)
+onnx>=1.14.0
+onnxscript>=0.1.0
+onnx2tf>=1.17.0
+
